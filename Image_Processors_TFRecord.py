@@ -6,8 +6,6 @@ from _collections import OrderedDict
 from .Plot_And_Scroll_Images.Plot_Scroll_Images import plot_scroll_Image, plt
 
 
-def get_start_stop(annotation, extension=np.inf, desired_val=1):
-    non_zero_values = np.where(np.max(annotation,axis=(1,2)) >= desired_val)[0]
     start, stop = -1, -1
     if non_zero_values.any():
         start = int(non_zero_values[0])
@@ -68,6 +66,38 @@ class Add_Dose(Image_Processor):
         input_features['dose_spacing_images'] = spacing[0]
         input_features['dose_spacing_rows'] = spacing[1]
         input_features['dose_spacing_cols'] = spacing[2]
+        return input_features
+
+class Normalize_MRI(Image_Processor):
+    def parse(self, input_features):
+        image_handle = sitk.GetImageFromArray(input_features['image'])
+        image = input_features['image']
+
+        normalizationFilter = sitk.IntensityWindowingImageFilter()
+        upperPerc = np.percentile(image, 99)
+        lowerPerc = np.percentile(image,1)
+
+        normalizationFilter.SetOutputMaximum(255.0)
+        normalizationFilter.SetOutputMinimum(0.0)
+        normalizationFilter.SetWindowMaximum(upperPerc)
+        normalizationFilter.SetWindowMinimum(lowerPerc)
+
+        normalizedImage = normalizationFilter.Execute(image_handle)
+
+        image = sitk.GetArrayFromImage(normalizedImage)
+        input_features['image'] = image
+        return input_features
+
+class N4BiasCorrection(Image_Processor):
+    def parse(self, input_features):
+        image_handle = sitk.GetImageFromArray(input_features['image'])
+        corrector = sitk.N4BiasFieldCorrectionImageFilter()
+        corrector.SetMaximumNumberOfIterations([int(2)*2])
+        try:
+            N4_normalized_image = corrector.Execute(image_handle)
+        except RuntimeError:
+            N4_normalized_image = corrector.Execute(image_handle)
+        input_features['image'] = sitk.GetArrayFromImage(N4_normalized_image)
         return input_features
 
 
