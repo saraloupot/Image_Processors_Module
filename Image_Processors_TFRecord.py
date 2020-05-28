@@ -6,6 +6,8 @@ from _collections import OrderedDict
 from .Plot_And_Scroll_Images.Plot_Scroll_Images import plot_scroll_Image, plt
 
 
+def get_start_stop(annotation, extension=np.inf):
+    non_zero_values = np.where(np.max(annotation,axis=(1,2)) > 0)[0]
     start, stop = -1, -1
     if non_zero_values.any():
         start = int(non_zero_values[0])
@@ -178,14 +180,11 @@ class Split_Disease_Into_Cubes(Image_Processor):
 
 
 class Distribute_into_3D(Image_Processor):
-    def __init__(self, min_z=0, max_z=np.inf, max_rows=np.inf, max_cols=np.inf, mirror_small_bits=True,
-                 chop_ends=False, desired_val=1):
+    def __init__(self, min_z=0, max_z=np.inf, max_rows=np.inf, max_cols=np.inf, mirror_small_bits=True):
         self.max_z = max_z
         self.min_z = min_z
         self.max_rows, self.max_cols = max_rows, max_cols
         self.mirror_small_bits = mirror_small_bits
-        self.chop_ends = chop_ends
-        self.desired_val = desired_val
 
     def parse(self, input_features):
         out_features = OrderedDict()
@@ -207,7 +206,6 @@ class Distribute_into_3D(Image_Processor):
                 continue
             image = image_base[start_chop:start_chop + step, ...]
             annotation = annotation_base[start_chop:start_chop + step, ...]
-            start_chop += step
             if image.shape[0] < max([step, self.min_z]):
                 if self.mirror_small_bits:
                     while image.shape[0] < max([step, self.min_z]):
@@ -217,11 +215,7 @@ class Distribute_into_3D(Image_Processor):
                         annotation = np.concatenate([annotation, mirror_annotation], axis=0)
                     image = image[:max([step, self.min_z])]
                     annotation = annotation[:max([step, self.min_z])]
-                elif self.chop_ends:
-                    continue
-            start, stop = get_start_stop(annotation, extension=0, desired_val=self.desired_val)
-            if start == -1 or stop == -1:
-                continue # no annotation here
+            start, stop = get_start_stop(annotation, extension=0)
             image_features['image_path'] = image_path
             image_features['image'] = image
             image_features['annotation'] = annotation.astype('int8')
@@ -235,6 +229,7 @@ class Distribute_into_3D(Image_Processor):
                 if key not in image_features.keys():
                     image_features[key] = input_features[key] # Pass along all other keys.. be careful
             out_features['Image_{}'.format(index)] = image_features
+            start_chop += step
         return out_features
 
 
