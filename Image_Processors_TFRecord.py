@@ -3,11 +3,172 @@ __author__ = 'Brian M Anderson'
 import SimpleITK as sitk
 import numpy as np
 from _collections import OrderedDict
+from .Resample_Class.Resample_Class import Resample_Class_Object
+from scipy.ndimage.filters import gaussian_filter
+import tensorflow as tf
+import os, pickle
 from .Plot_And_Scroll_Images.Plot_Scroll_Images import plot_scroll_Image, plt
 
 
-def get_start_stop(annotation, extension=np.inf):
-    non_zero_values = np.where(np.max(annotation,axis=(1,2)) > 0)[0]
+
+class Image_Processor(object):
+    def parse(self, input_features):
+        return input_features
+
+
+def save_obj(path, obj): # Save almost anything.. dictionary, list, etc.
+    if path.find('.pkl') == -1:
+        path += '.pkl'
+    with open(path, 'wb') as f:
+        pickle.dump(obj, f)
+    return None
+
+
+def load_obj(path):
+    if path.find('.pkl') == -1:
+        path += '.pkl'
+    if os.path.exists(path):
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+    else:
+        out = OrderedDict()
+        return out
+
+
+def return_feature(data):
+    if type(data) is int:
+        return _int64_feature(tf.constant(data, dtype='int64'))
+    elif type(data) is np.ndarray:
+        return _bytes_feature(data.tostring())
+    elif type(data) is str:
+        return _bytes_feature(tf.constant(data))
+    elif type(data) is np.float32:
+        return _float_feature(tf.constant(data, dtype='float32'))
+
+
+def _bytes_feature(value):
+    if isinstance(value, type(tf.constant(0))):
+        value = value.numpy()
+    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+
+
+def _float_feature(value):
+    return tf.train.Feature(float_list=tf.train.FloatList(value=[value]))
+
+
+def _float_features(values):
+    return tf.train.Features(float_list=tf.train.FloatList(values=[values]))
+
+
+def _int64_feature(value):
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+
+
+def return_example_proto(base_dictionary, image_dictionary_for_pickle={}, data_type_dictionary={}):
+    feature = OrderedDict()
+    for key in base_dictionary:
+        data = base_dictionary[key]
+        if type(data) is int:
+            feature[key] = _int64_feature(tf.constant(data, dtype='int64'))
+            if key not in image_dictionary_for_pickle:
+                image_dictionary_for_pickle[key] = tf.io.FixedLenFeature([], tf.int64)
+        elif type(data) is np.ndarray:
+            feature[key] = _bytes_feature(data.tostring())
+            if key not in image_dictionary_for_pickle:
+                image_dictionary_for_pickle[key] = tf.io.FixedLenFeature([], tf.string)
+                data_type_dictionary[key] = data.dtype
+        elif type(data) is str:
+            feature[key] = _bytes_feature(tf.constant(data))
+            if key not in image_dictionary_for_pickle:
+                image_dictionary_for_pickle[key] = tf.io.FixedLenFeature([], tf.string)
+        elif type(data) is np.float32:
+            feature[key] = _float_feature(tf.constant(data, dtype='float32'))
+            if key not in image_dictionary_for_pickle:
+                image_dictionary_for_pickle[key] = tf.io.FixedLenFeature([], tf.float32)
+    example_proto = tf.train.Example(features=tf.train.Features(feature=feature))
+    return example_proto
+
+
+def serialize_example(image_path, annotation_path, image_processors=None, record_writer=None):
+    get_features(image_path,annotation_path, image_processors=image_processors, record_writer=record_writer)
+
+
+class Record_Writer(Image_Processor):
+    def __init__(self, file_path=None):
+        assert file_path is not None, "You need to pass a base file path..."
+        self.file_path = file_path
+        if not os.path.exists(file_path):
+            os.makedirs(file_path)
+
+    def parse(self, input_features):
+        keys = list(input_features.keys())
+        image_name = os.path.split(input_features[keys[0]]['image_path'])[-1].split('.nii')[0]
+        filename = os.path.join(self.file_path,'{}.tfrecord'.format(image_name))
+        features = OrderedDict()
+        d_type = OrderedDict()
+        writer = tf.io.TFRecordWriter(filename)
+        examples = 0
+        for key in input_features.keys():
+            example_proto = return_example_proto(input_features[key], features, d_type)
+            writer.write(example_proto.SerializeToString())
+            examples += 1
+        writer.close()
+        fid = open(filename.replace('.tfrecord', '_Num_Examples.txt'), 'w+')
+        fid.write(str(examples))
+        fid.close()
+        save_obj(filename.replace('.tfrecord', '_features.pkl'), features)
+        save_obj(filename.replace('.tfrecord', '_dtype.pkl'), d_type)
+        del input_features
+        return {}
+
+
+def get_features(image_path, annotation_path, image_processors=None, record_writer=None):
+    features = OrderedDict()
+    features['image_path'] = image_path
+    features['annotation_path'] = annotation_path
+    if image_processors is not None:
+        for image_processor in image_processors:
+            features, _ = down_dictionary(features, OrderedDict(), 0)
+            for key in features.keys():
+                features[key] = image_processor.parse(features[key])
+        features, _ = down_dictionary(features, OrderedDict(), 0)
+    record_writer.parse(features)
+
+
+def down_dictionary(input_dictionary, out_dictionary=OrderedDict(), out_index=0):
+    if 'image_path' in input_dictionary.keys():
+        out_dictionary['Example_{}'.format(out_index)] = input_dictionary
+        out_index += 1
+        return out_dictionary, out_index
+    else:
+        for key in input_dictionary.keys():
+            out_dictionary, out_index = down_dictionary(input_dictionary[key], out_dictionary, out_index)
+    return out_dictionary, out_index
+
+
+def to_categorical(y, num_classes=None, dtype='float32'):
+    """Converts a class vector (integers) to binary class matrix.
+    Taken from tf.keras.utils.to_categorical
+    """
+    y = np.array(y, dtype='int')
+    input_shape = y.shape
+    if input_shape and input_shape[-1] == 1 and len(input_shape) > 1:
+        input_shape = tuple(input_shape[:-1])
+    y = y.ravel()
+    if not num_classes:
+        num_classes = np.max(y) + 1
+    n = y.shape[0]
+    categorical = np.zeros((n, num_classes), dtype=dtype)
+    categorical[np.arange(n), y] = 1
+    output_shape = input_shape + (num_classes,)
+    categorical = np.reshape(categorical, output_shape)
+    return categorical
+
+
+def get_start_stop(annotation, extension=np.inf, desired_val=1):
+    if len(annotation.shape) > 3:
+        annotation = np.argmax(annotation,axis=-1)
+    non_zero_values = np.where(np.max(annotation,axis=(1,2)) >= desired_val)[0]
     start, stop = -1, -1
     if non_zero_values.any():
         start = int(non_zero_values[0])
@@ -28,9 +189,191 @@ def get_bounding_boxes(annotation_handle,value):
     return bounding_boxes, num_voxels
 
 
-class Image_Processor(object):
+class Remove_Smallest_Structures(Image_Processor):
+    def __init__(self):
+        self.Connected_Component_Filter = sitk.ConnectedComponentImageFilter()
+        self.RelabelComponent = sitk.RelabelComponentImageFilter()
+        self.RelabelComponent.SortByObjectSizeOn()
+
+    def remove_smallest_component(self, annotation_handle):
+        label_image = self.Connected_Component_Filter.Execute(
+            sitk.BinaryThreshold(sitk.Cast(annotation_handle,sitk.sitkFloat32), lowerThreshold=0.01,
+                                 upperThreshold=np.inf))
+        label_image = self.RelabelComponent.Execute(label_image)
+        output = sitk.BinaryThreshold(sitk.Cast(label_image,sitk.sitkFloat32), lowerThreshold=0.1,upperThreshold=1.0)
+        return output
+
+
+class Remove_Lowest_Probabilty_Structure(object):
+    def __init__(self):
+        self.Connected_Component_Filter = sitk.ConnectedComponentImageFilter()
+        self.RelabelComponent = sitk.RelabelComponentImageFilter()
+        self.RelabelComponent.SortByObjectSizeOn()
+
+    def remove_lowest_probability(self, image_slice):
+        stats = sitk.LabelShapeStatisticsImageFilter()
+        thresholded_image = sitk.GetImageFromArray(image_slice) > 0
+        connected_image = self.Connected_Component_Filter.Execute(thresholded_image)
+        stats.Execute(connected_image)
+        if self.Connected_Component_Filter.GetObjectCount() < 2:
+            return image_slice
+        current = 0
+        for value in range(1, self.Connected_Component_Filter.GetObjectCount()+1):
+            mask = sitk.GetArrayFromImage(connected_image == value)
+            prob = np.max(image_slice[mask==1])
+            if prob > current:
+                current = prob
+                out_mask = mask
+        image_slice[out_mask==0] = 0
+        return image_slice
+
+
+class Gaussian_Uncertainty(Image_Processor):
+    def __init__(self, sigma=None):
+        '''
+        :param sigma: Desired sigma, in mm, in z, x, y direction
+        '''
+        self.sigma = sigma
+
     def parse(self, input_features):
+        remove_lowest_probability = Remove_Lowest_Probabilty_Structure()
+        remove_smallest = Remove_Smallest_Structures()
+        annotations = input_features['annotation']
+        spacing = input_features['spacing']
+        filtered = np.zeros(annotations.shape)
+        filtered[...,0] = annotations[...,0]
+        for i in range(1,9):
+            sigma = self.sigma[i-1]
+            sigma = [sigma/spacing[0], sigma/spacing[1], sigma/spacing[2]]
+            annotation = annotations[...,i]
+            filtered[...,i] = gaussian_filter(annotation,sigma=sigma,mode='constant')
+        filtered[annotations[...,0] == 1] = 0
+        filtered[...,0] = annotations[...,0]
+        # Now we've normed, but still have the problem that unconnected structures can still be there..
+        filtered[filtered < 0.05] = 0
+        for i in range(1,9):
+            annotation = filtered[...,i]
+            slices = np.where(np.max(annotation,axis=(1,2))>0)
+            for slice in slices[0]:
+                annotation[slice] = remove_lowest_probability.remove_lowest_probability(annotation[slice])
+            mask_handle = remove_smallest.remove_smallest_component(sitk.GetImageFromArray(annotation)>0)
+            mask = sitk.GetArrayFromImage(mask_handle)
+            annotation[mask==0] = 0
+            filtered[..., i] = annotation
+        norm = np.sum(filtered[..., 1:], axis=-1)
+        filtered /= norm[...,None]
+        filtered = np.nan_to_num(filtered) # worry about true divide
+        filtered[annotations[...,0] == 1] = 0
+        filtered[...,0] = annotations[...,0]
+        input_features['annotation'] = filtered
         return input_features
+
+
+class To_Categorical(Image_Processor):
+    def __init__(self, num_classes=9):
+        self.num_classes = num_classes
+
+    def parse(self, input_features):
+        annotation = input_features['annotation']
+        input_features['annotation'] = to_categorical(annotation,self.num_classes)
+        input_features['num_classes'] = self.num_classes
+        return input_features
+
+
+class Resample_LiTs(Image_Processor):
+    def __init__(self, desired_output_spacing=(None,None,None)):
+        self.desired_output_spacing = desired_output_spacing
+
+    def parse(self, input_features):
+        input_spacing = tuple([float(i) for i in input_features['spacing']])
+        image_handle = sitk.GetImageFromArray(input_features['image'])
+        image_handle.SetSpacing(input_spacing)
+        annotation_handle = sitk.GetImageFromArray(input_features['annotation'])
+        annotation_handle.SetSpacing(input_spacing)
+        output_spacing = []
+        for index in range(3):
+            if self.desired_output_spacing[index] is None:
+                spacing = input_spacing[index]
+                output_spacing.append(spacing)
+            else:
+                output_spacing.append(self.desired_output_spacing[index])
+        output_spacing = tuple(output_spacing)
+        if output_spacing != input_spacing:
+            resampler = Resample_Class_Object()
+            print('Resampling {} to {}'.format(input_spacing,output_spacing))
+            image_handle = resampler.resample_image(input_image=image_handle,input_spacing=input_spacing,
+                                                    output_spacing=output_spacing,is_annotation=False)
+            annotation_handle = resampler.resample_image(input_image=annotation_handle,input_spacing=input_spacing,
+                                                         output_spacing=output_spacing,is_annotation=False)
+            input_features['image'] = sitk.GetArrayFromImage(image_handle)
+            input_features['annotation'] = sitk.GetArrayFromImage(annotation_handle)
+            input_features['spacing'] = np.asarray(annotation_handle.GetSpacing(), dtype='float32')
+        return input_features
+
+
+class Resampler(Image_Processor):
+    def __init__(self, desired_output_spacing=(None,None,None), make_512=False, binary_annotation=True):
+        self.desired_output_spacing = desired_output_spacing
+        self.binary_annotation = binary_annotation
+        self.make_512 = make_512
+
+    def parse(self, input_features):
+        input_spacing = tuple([float(i) for i in input_features['spacing']])
+        image_handle = sitk.GetImageFromArray(input_features['image'])
+        image_handle.SetSpacing(input_spacing)
+        output_spacing = []
+        for index in range(3):
+            if self.desired_output_spacing[index] is None:
+                if input_spacing[index] < 0.5 and self.make_512:
+                    spacing = input_spacing[index] * 2
+                else:
+                    spacing = input_spacing[index]
+                output_spacing.append(spacing)
+            else:
+                output_spacing.append(self.desired_output_spacing[index])
+        output_spacing = tuple(output_spacing)
+        if output_spacing != input_spacing:
+            resampler = Resample_Class_Object()
+            print('Resampling {} to {}'.format(input_spacing,output_spacing))
+            image_handle = resampler.resample_image(input_image=image_handle,input_spacing=input_spacing,
+                                                    output_spacing=output_spacing,is_annotation=False)
+            if len(input_features['annotation'].shape) == 3:
+                annotation_handle = sitk.GetImageFromArray(input_features['annotation'])
+                annotation_handle = resampler.resample_image(input_image=annotation_handle,input_spacing=input_spacing,
+                                                             output_spacing=output_spacing,is_annotation=self.binary_annotation)
+            else:
+                annotation = input_features['annotation']
+                output = []
+                for i in range(annotation.shape[-1]):
+                    output.append(resampler.resample_image(annotation[...,i], input_spacing=input_spacing,
+                                                           output_spacing=output_spacing,
+                                                           is_annotation=self.binary_annotation)[...,None])
+                stacked = np.concatenate(output, axis=-1)
+                stacked[...,0] = 1-np.sum(stacked[...,1:],axis=-1)
+                annotation_handle = sitk.GetImageFromArray(stacked)
+                annotation_handle.SetSpacing(image_handle.GetSpacing())
+                annotation_handle.SetDirection(image_handle.GetDirection())
+                annotation_handle.SetOrigin(image_handle.GetOrigin())
+            input_features['image'] = sitk.GetArrayFromImage(image_handle)
+            input_features['annotation'] = sitk.GetArrayFromImage(annotation_handle)
+            input_features['spacing'] = np.asarray(annotation_handle.GetSpacing(), dtype='float32')
+        return input_features
+
+
+class Cast_Data(Image_Processor):
+    def __init__(self, key_type_dict=None):
+        '''
+        :param key_type_dict: A dictionary of keys and datatypes wanted {'image':'float32'}
+        '''
+        assert key_type_dict is not None and type(key_type_dict) is dict, 'Need to provide a key_type_dict, something' \
+                                                                          ' like {"image":"float32"}'
+        self.key_type_dict = key_type_dict
+
+    def parse(self, image_features, *args, **kwargs):
+        for key in self.key_type_dict:
+            if key in image_features:
+                image_features[key] = image_features[key].astype(self.key_type_dict[key])
+        return image_features
 
 
 class Add_Images_And_Annotations(Image_Processor):
@@ -43,14 +386,6 @@ class Add_Images_And_Annotations(Image_Processor):
         input_features['image'] = image
         input_features['annotation'] = annotation
         input_features['spacing'] = np.asarray(annotation_handle.GetSpacing(), dtype='float32')
-        return input_features
-
-
-class Add_Outcome(Image_Processor):
-    def parse(self, input_features):
-        image_path = input_features['image_path']
-        outcome = image_path.replace('Overall_Dat...')
-        input_features['Outcome'] = 1
         return input_features
 
 
@@ -118,6 +453,41 @@ class Clip_Images_By_Extension(Image_Processor):
         return input_features
 
 
+class Normalize_MRI(Image_Processor):
+    def parse(self, input_features):
+        image_handle = sitk.GetImageFromArray(input_features['image'])
+        image = input_features['image']
+
+        normalizationFilter = sitk.IntensityWindowingImageFilter()
+        upperPerc = np.percentile(image, 99)
+        lowerPerc = np.percentile(image,1)
+
+        normalizationFilter.SetOutputMaximum(255.0)
+        normalizationFilter.SetOutputMinimum(0.0)
+        normalizationFilter.SetWindowMaximum(upperPerc)
+        normalizationFilter.SetWindowMinimum(lowerPerc)
+
+        normalizedImage = normalizationFilter.Execute(image_handle)
+
+        image = sitk.GetArrayFromImage(normalizedImage)
+        input_features['image'] = image
+        return input_features
+
+
+class N4BiasCorrection(Image_Processor):
+    def parse(self, input_features):
+        image_handle = sitk.GetImageFromArray(input_features['image'])
+        corrector = sitk.N4BiasFieldCorrectionImageFilter()
+        corrector.SetMaximumNumberOfIterations([int(2)*2])
+        try:
+            N4_normalized_image = corrector.Execute(image_handle)
+        except RuntimeError:
+            N4_normalized_image = corrector.Execute(image_handle)
+        input_features['image'] = sitk.GetArrayFromImage(N4_normalized_image)
+        return input_features
+
+
+
 class Split_Disease_Into_Cubes(Image_Processor):
     def __init__(self, disease_annotation=None, cube_size=(16, 120, 120), min_voxel_volume=0, max_voxels=np.inf):
         '''
@@ -157,25 +527,35 @@ class Split_Disease_Into_Cubes(Image_Processor):
                 image = image_base[z_start:z_stop, r_start:r_stop, c_start:c_stop]
                 annotation = annotation_base[z_start:z_stop, r_start:r_stop, c_start:c_stop]
 
-                stack = [np.stack([image,annotation],axis=0)]
+                stack_image, stack_annotation = [image[None,...]], [annotation[None,...]]
                 for axis in range(3):
-                    output = []
-                    for i in stack:
+                    output_images = []
+                    output_annotations = []
+                    for i in stack_image:
                         split = i.shape[axis+1] // self.cube_size[axis]
                         if split > 1:
-                            output += np.array_split(i, split, axis=axis+1)
+                            output_images += np.array_split(i, split, axis=axis+1)
                         else:
-                            output += [i]
-                    stack = output
-                for box_index, cube in enumerate(stack):
+                            output_images += [i]
+                    for i in stack_annotation:
+                        split = i.shape[axis+1] // self.cube_size[axis]
+                        if split > 1:
+                            output_annotations += np.array_split(i, split, axis=axis+1)
+                        else:
+                            output_annotations += [i]
+                    stack_image = output_images
+                    stack_annotation = output_annotations
+                for box_index, [image_cube, annotation_cube] in enumerate(zip(stack_image, stack_annotation)):
                     temp_feature = OrderedDict()
-                    temp_feature['image'] = cube[0][:self.cube_size[0]]
-                    temp_feature['annotation'] = cube[1][:self.cube_size[0]].astype('int8')
+                    image_cube, annotation_cube = image_cube[0], annotation_cube[0]
+                    temp_feature['image'] = image_cube[:self.cube_size[0]]
+                    temp_feature['annotation'] = annotation_cube[:self.cube_size[0]]
                     for key in input_features:  # Bring along anything else we care about
                         if key not in temp_feature.keys():
                             temp_feature[key] = input_features[key]
                     out_features['Disease_Box_{}_{}'.format(cube_index, box_index)] = temp_feature
-            return out_features
+            input_features = out_features
+            return input_features
         return input_features
 
 
@@ -218,7 +598,7 @@ class Distribute_into_3D(Image_Processor):
             start, stop = get_start_stop(annotation, extension=0)
             image_features['image_path'] = image_path
             image_features['image'] = image
-            image_features['annotation'] = annotation.astype('int8')
+            image_features['annotation'] = annotation
             image_features['start'] = start
             image_features['stop'] = stop
             image_features['z_images'] = image.shape[0]
@@ -229,8 +609,8 @@ class Distribute_into_3D(Image_Processor):
                 if key not in image_features.keys():
                     image_features[key] = input_features[key] # Pass along all other keys.. be careful
             out_features['Image_{}'.format(index)] = image_features
-            start_chop += step
-        return out_features
+        input_features = out_features
+        return input_features
 
 
 class Distribute_into_2D(Image_Processor):
@@ -246,21 +626,43 @@ class Distribute_into_2D(Image_Processor):
             image_features = OrderedDict()
             image_features['image_path'] = image_path
             image_features['image'] = image[index]
-            image_features['annotation'] = annotation[index].astype('int8')
+            image_features['annotation'] = annotation[index]
             image_features['rows'] = rows
             image_features['cols'] = cols
             image_features['spacing'] = spacing[:-1]
             out_features['Image_{}'.format(index)] = image_features
-        return out_features
+        input_features = out_features
+        return input_features
+
+
+class NormalizeParotidMR(Image_Processor):
+    def parse(self, input_features):
+        images = input_features['image']
+        data = images.flatten()
+        counts, bins = np.histogram(data, bins=1000)
+        count_index = 0
+        count_value = 0
+        while count_value/np.sum(counts) < .3: # Throw out the bottom 30 percent of data, as that is usually just 0s
+            count_value += counts[count_index]
+            count_index += 1
+        min_bin = bins[count_index]
+        data = data[data>min_bin]
+        mean_val, std_val = np.mean(data), np.std(data)
+        images = (images - mean_val)/std_val
+        input_features['image'] = images
+        return input_features
 
 
 class Normalize_to_annotation(Image_Processor):
-    def __init__(self, annotation_value_list=None):
+    def __init__(self, annotation_value_list=None, mirror_max=False, lower_percentile=None, upper_percentile=None):
         '''
         :param annotation_value: mask values to normalize over, [1]
         '''
         assert annotation_value_list is not None, 'Need to provide a list of values'
         self.annotation_value_list = annotation_value_list
+        self.mirror_max = mirror_max
+        self.lower_percentile = lower_percentile
+        self.upper_percentile = upper_percentile
 
     def parse(self, input_features):
         images = input_features['image']
@@ -269,6 +671,14 @@ class Normalize_to_annotation(Image_Processor):
         for value in self.annotation_value_list:
             mask += annotation == value
         data = images[mask > 0].flatten()
+        if self.lower_percentile is not None and self.upper_percentile is not None:
+            lower_bound = np.percentile(data,25)
+            upper_bound = np.percentile(data,75)
+            data = data[np.where((data >= lower_bound) & (data <= upper_bound))]
+            mean_val, std_val = np.mean(data), np.std(data)
+            images = (images - mean_val) / std_val
+            input_features['image'] = images
+            return input_features
         counts, bins = np.histogram(data, bins=100)
         bins = bins[:-1]
         count_index = np.where(counts == np.max(counts))[0][-1]
@@ -285,6 +695,8 @@ class Normalize_to_annotation(Image_Processor):
         min_50 = np.where(half_lower == np.min(half_lower))[0][0]
 
         min_values = bins[count_index - min_50]
+        if self.mirror_max:
+            min_values = bins[count_index - max_50]  # Good for non-normal distributions, just mirror the other FWHM
         max_values = bins[count_index + max_50]
         data = data[np.where((data >= min_values) & (data <= max_values))]
         mean_val, std_val = np.mean(data), np.std(data)
@@ -320,13 +732,20 @@ class Box_Images(Image_Processor):
     def parse(self, input_features):
         annotation = input_features['annotation']
         image = input_features['image']
-        mask = np.zeros(annotation.shape)
-        for val in self.wanted_vals_for_bbox:
-            mask[annotation == val] = 1
-        input_features['mask'] = mask
+        if len(annotation.shape) > 3:
+            mask = np.zeros(annotation.shape[:-1])
+            argmax_annotation = np.argmax(annotation, axis=-1)
+            for val in self.wanted_vals_for_bbox:
+                mask[argmax_annotation==val] = 1
+        else:
+            mask = np.zeros(annotation.shape)
+            for val in self.wanted_vals_for_bbox:
+                mask[annotation == val] = 1
         for val in [1]:
             add_indexes = Add_Bounding_Box_Indexes([val],label_name='mask')
+            input_features['mask'] = mask
             add_indexes.parse(input_features)
+            del input_features['mask']
             z_start, z_stop, r_start, r_stop, c_start, c_stop = add_bounding_box_to_dict(
                 input_features['bounding_boxes_{}'.format(val)][0], return_indexes=True)
 
@@ -340,6 +759,13 @@ class Box_Images(Image_Processor):
             remainder_z, remainder_r, remainder_c = self.power_val_z - z_total % self.power_val_z if z_total % self.power_val_z != 0 else 0, \
                                                     self.power_val_r - r_total % self.power_val_r if r_total % self.power_val_r != 0 else 0, \
                                                     self.power_val_c - c_total % self.power_val_c if c_total % self.power_val_c != 0 else 0
+            remainders = np.asarray([remainder_z, remainder_r, remainder_c])
+            z_start, z_stop, r_start, r_stop, c_start, c_stop = expand_box_indexes(z_start, z_stop, r_start, r_stop,
+                                                                                   c_start, c_stop,
+                                                                                   annotation_shape=
+                                                                                   annotation.shape,
+                                                                                   bounding_box_expansion=
+                                                                                   remainders // 2 + 1)
             min_images, min_rows, min_cols = z_total + remainder_z, r_total + remainder_r, c_total + remainder_c
             if self.min_images is not None:
                 min_images = max([min_images, self.min_images])
@@ -347,16 +773,19 @@ class Box_Images(Image_Processor):
                 min_rows = max([min_rows, self.min_rows])
             if self.min_cols is not None:
                 min_cols = max([min_cols, self.min_cols])
-            out_images = np.ones([min_images, min_rows, min_cols]) * np.min(image)
-            out_annotations = np.zeros([min_images, min_rows, min_cols], dtype='int8')
-            out_annotations[..., 0] = 1
+            out_images = np.ones([min_images, min_rows, min_cols], dtype=image.dtype) * np.min(image)
+            if len(annotation.shape) > 3:
+                out_annotations = np.zeros([min_images, min_rows, min_cols, annotation.shape[-1]], dtype=annotation.dtype)
+                out_annotations[..., 0] = 1
+            else:
+                out_annotations = np.ones([min_images, min_rows, min_cols], dtype=annotation.dtype)
             image_cube = image[z_start:z_start + min_images, r_start:r_start + min_rows, c_start:c_start + min_cols]
             annotation_cube = annotation[z_start:z_start + min_images, r_start:r_start + min_rows,
                               c_start:c_start + min_cols]
             img_shape = image_cube.shape
             out_images[:img_shape[0], :img_shape[1], :img_shape[2], ...] = image_cube
             out_annotations[:img_shape[0], :img_shape[1], :img_shape[2], ...] = annotation_cube
-            input_features['annotation'] = out_annotations.astype('int8')
+            input_features['annotation'] = out_annotations
             input_features['image'] = out_images
         return input_features
 
@@ -372,11 +801,17 @@ class Add_Bounding_Box_Indexes(Image_Processor):
         self.label_name = label_name
 
     def parse(self, input_features):
-        annotation = input_features[self.label_name]
+        annotation_base = input_features[self.label_name]
         for val in self.wanted_vals_for_bbox:
-            slices = np.where(annotation == val)
+            temp_val = val
+            if len(annotation_base.shape) > 3:
+                annotation = (annotation_base[..., val] > 0).astype('int')
+                temp_val = 1
+            else:
+                annotation = annotation_base
+            slices = np.where(annotation == temp_val)
             if slices:
-                bounding_boxes, voxel_volumes = get_bounding_boxes(sitk.GetImageFromArray(annotation), val)
+                bounding_boxes, voxel_volumes = get_bounding_boxes(sitk.GetImageFromArray(annotation), temp_val)
                 input_features['voxel_volumes_{}'.format(val)] = voxel_volumes
                 input_features['bounding_boxes_{}'.format(val)] = bounding_boxes
                 input_features = add_bounding_box_to_dict(input_features=input_features, bounding_box=bounding_boxes[0],
